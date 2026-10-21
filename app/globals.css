@@ -968,3 +968,41 @@ body {
 *::-webkit-scrollbar-track { background: transparent; }
 
 :focus:not(:focus-visible) { outline: none; }
+
+/* HTML·PPT 자료 (documents) · 목록 행 버튼 */
+.lightbox-doc {
+  width: calc(100vw - 32px);
+  height: calc(100vh - 32px);
+}
+.lightbox:has(.lightbox-doc) { padding: 16px; }
+.doc-frame { background: #fff; }
+.doc-loading { padding: 16px; }
+.tree-row { position: relative; }
+.tree-row .tree-file { padding-right: 56px; }
+.row-acts {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+.tree-row:hover .row-acts, .row-acts:focus-within { opacity: 1; }
+.row-act {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-3);
+  font: 500 14px/1 var(--font);
+  cursor: pointer;
+}
+.row-act:hover { color: var(--fg); background: var(--line); }
+.row-act.del:hover { color: #c0392b; background: transparent; }
+.lightbox-acts { display: flex; gap: 6px; flex: none; }
+@media (hover: none) { .row-acts { opacity: 1; } }

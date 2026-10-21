@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { ViewerEngine } from '@/lib/viewer-engine';
-import { kindOf, is3d, isShareableId, sharePath, fmtDate, safeFileName, isPdfName, isImageFile, issueStatus, nextIssueStatus, lectureErr, hashColor, peersFromPresence, isPdfComment, is2dComment, commentSurface, commentWhere, schemaGap, unitPos, ndcFromEvent, ndcToUnit, pageTurn, clampPdfZoom, pageUnitFromRotated, rotatedFromPageUnit, groupProjects, sampleBundle, hlabBundle, mergeLectureModels, mergeLectureDrawings, SAMPLE_PROJECT, HLAB_PROJECT, rowProject, fileKindLabel, lectureFileName, commentHotkeyBlocked, projectKey, projectNameOf, projectActivity, activityTitle, fileEventType, asActivityEvent, eventKind, PROJECTS_KEY, readNamedProjects, addNamedProject, pickProject } from '@/lib/format';
+import { kindOf, is3d, isShareableId, sharePath, fmtDate, safeFileName, isPdfName, isHtmlName, isPptName, PPT_TYPES, isImageFile, issueStatus, nextIssueStatus, lectureErr, hashColor, peersFromPresence, isPdfComment, is2dComment, commentSurface, commentWhere, schemaGap, unitPos, ndcFromEvent, ndcToUnit, pageTurn, clampPdfZoom, pageUnitFromRotated, rotatedFromPageUnit, groupProjects, sampleBundle, hlabBundle, mergeLectureModels, mergeLectureDrawings, SAMPLE_PROJECT, HLAB_PROJECT, rowProject, fileKindLabel, lectureFileName, commentHotkeyBlocked, projectKey, projectNameOf, projectActivity, activityTitle, fileEventType, asActivityEvent, eventKind, PROJECTS_KEY, readNamedProjects, addNamedProject, pickProject } from '@/lib/format';
 import { paintPdfPage } from '@/lib/pdf-view';
-import { supabase, hasSupabase, BUCKET, PHOTO_BUCKET, DRAWING_BUCKET, APP_TITLE, publicUrl } from '@/lib/supabase';
+import { supabase, hasSupabase, BUCKET, PHOTO_BUCKET, DRAWING_BUCKET, DOC_BUCKET, APP_TITLE, publicUrl } from '@/lib/supabase';
 
 const AUTHOR_KEY = 'viewer-author';
 // 좁은 화면(폰)에선 패널이 뷰어를 덮으므로 한 번에 하나만 엽니다
@@ -161,6 +161,8 @@ export default function Studio() {
   const eventsGapNotedRef = useRef(false);
   const statusOkRef = useRef(true);
   const statusGapNotedRef = useRef(false);
+  const loadDocsRef = useRef(null);
+  const localDocsRef = useRef({});
 
   const [ready, setReady] = useState(false);
   const [models, setModels] = useState([]);
@@ -204,6 +206,8 @@ export default function Studio() {
   const [drawings, setDrawings] = useState([]);
   const [photo, setPhoto] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [docs, setDocs] = useState([]);
+  const [docView, setDocView] = useState(null);
   const [issueFilter, setIssueFilter] = useState('all');
   const [peers, setPeers] = useState([]);
   const [drawing, setDrawing] = useState(null);
@@ -245,6 +249,10 @@ export default function Studio() {
     setExtraEvents(readActivity());
     loadProjects();
   }, []);
+
+  useEffect(() => {
+    loadDocs();
+  }, [activeKey, namedProjects]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -324,6 +332,9 @@ export default function Studio() {
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'events' }, () => {
         loadEvents();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'documents' }, () => {
+        loadDocsRef.current?.();
       })
       .subscribe();
     return () => {
@@ -544,6 +555,171 @@ export default function Studio() {
     projectMapRef.current.set(label, data.id);
     setNamedProjects((list) => addNamedProject(list, label));
     return data.id;
+  }
+
+  // HTML 자료는 documents 표가 기준입니다. 프로젝트(projects.id)마다 여러 개.
+  async function loadDocs() {
+    const label = projectNameOf(activeKeyRef.current);
+    if (!hasSupabase) {
+      setDocs(localDocsRef.current[label] || []);
+      return;
+    }
+    const pid = projectIdOf(label);
+    if (!pid) {
+      setDocs([]);
+      return;
+    }
+    const { data, error } = await supabase.from('documents').select('*').eq('project_id', pid).order('created_at', { ascending: false });
+    if (projectNameOf(activeKeyRef.current) !== label) return;
+    setDocs(error ? [] : data || []);
+  }
+  loadDocsRef.current = loadDocs;
+
+  async function handleDoc(file) {
+    const label = projectForUpload();
+    const ppt = isPptName(file.name);
+    if (isBuiltinProject(label)) {
+      setUploadErr(true);
+      setUploadStatus(`새 프로젝트를 만든 다음 ${ppt ? 'PPT' : 'HTML'}를 올려요.`);
+      return;
+    }
+    if (ppt && !hasSupabase) {
+      setUploadErr(true);
+      setUploadStatus('PPT는 수파베이스에 연결됐을 때만 볼 수 있어요.');
+      return;
+    }
+    if (!hasSupabase) {
+      const row = { id: `local-doc-${Date.now()}`, name: file.name, created_at: new Date().toISOString(), html: await file.text() };
+      (localDocsRef.current[label] ||= []).unshift(row);
+      setDocs([...localDocsRef.current[label]]);
+      setUploadStatus('이 브라우저에만 열려요.');
+      setDocView({ doc: row, name: row.name, html: row.html });
+      return;
+    }
+    setUploadStatus('올리는 중…');
+    const project_id = await ensureProjectId(label);
+    if (!project_id) {
+      setUploadErr(true);
+      setUploadStatus('프로젝트를 저장하지 못했어요.');
+      return;
+    }
+    // Storage 키는 한글을 받지 않으므로 경로는 영문으로. 보이는 이름(name)은 원래 파일명 그대로.
+    const ext = String(file.name).split('.').pop().toLowerCase();
+    const path = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const contentType = ppt ? (file.type || PPT_TYPES[ext]) : 'text/html; charset=utf-8';
+    const up = await supabase.storage.from(DOC_BUCKET).upload(path, file, { contentType, upsert: false });
+    if (up.error) {
+      setUploadErr(true);
+      setUploadStatus(lectureErr(up.error.message));
+      return;
+    }
+    const ins = await supabase.from('documents').insert({ project_id, name: file.name, path, owner: author.trim() || null }).select().single();
+    if (ins.error) {
+      setUploadErr(true);
+      setUploadStatus(lectureErr(ins.error.message));
+      return;
+    }
+    setUploadStatus(`"${file.name}" 올렸어요.`);
+    await loadDocs();
+    await openDoc(ins.data);
+  }
+
+  // PPT는 Microsoft Office 웹 뷰어가 공개 주소에서 받아 그립니다.
+  // HTML은 Storage가 화면용으로 내주지 않으므로 받아서 격리된 iframe(srcdoc)에 띄웁니다.
+  async function openDoc(d) {
+    if (isPptName(d.name)) {
+      const src = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(publicUrl(d.path, DOC_BUCKET))}`;
+      setDocView({ doc: d, name: d.name, src });
+      return;
+    }
+    if (d.html != null) {
+      setDocView({ doc: d, name: d.name, html: d.html });
+      return;
+    }
+    setDocView({ doc: d, name: d.name, html: null });
+    const { data, error } = await supabase.storage.from(DOC_BUCKET).download(d.path);
+    if (error || !data) {
+      setDocView(null);
+      setUploadErr(true);
+      setUploadStatus('자료를 열지 못했어요.');
+      return;
+    }
+    const html = await data.text();
+    setDocView((v) => (v && v.doc === d ? { ...v, html } : v));
+  }
+
+  // 다른 주소(Storage)의 파일은 <a download>가 이름을 무시하므로 받아서 blob으로 저장합니다.
+  function saveBlob(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name || 'file';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  async function downloadDoc(d) {
+    if (d.html != null) {
+      saveBlob(new Blob([d.html], { type: 'text/html' }), d.name);
+      return;
+    }
+    setUploadErr(false);
+    setUploadStatus(`"${d.name}" 받는 중…`);
+    const { data, error } = await supabase.storage.from(DOC_BUCKET).download(d.path);
+    if (error || !data) {
+      setUploadErr(true);
+      setUploadStatus('자료를 받지 못했어요.');
+      return;
+    }
+    saveBlob(data, d.name);
+    setUploadStatus('');
+  }
+
+  async function downloadFile(f) {
+    const local = f.source?.file || f.file;
+    if (local) {
+      saveBlob(local, f.name);
+      return;
+    }
+    const url = f.url || f.source?.url;
+    if (!url) {
+      setUploadErr(true);
+      setUploadStatus('이 파일은 받을 수 없어요.');
+      return;
+    }
+    setUploadErr(false);
+    setUploadStatus(`"${f.name}" 받는 중…`);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(String(res.status));
+      saveBlob(await res.blob(), f.name);
+      setUploadStatus('');
+    } catch {
+      setUploadErr(true);
+      setUploadStatus('파일을 받지 못했어요.');
+    }
+  }
+
+  async function onDeleteDoc(d) {
+    if (!hasSupabase) {
+      if (!window.confirm(`"${d.name}" 자료를 지울까요?`)) return;
+      const label = projectNameOf(activeKeyRef.current);
+      localDocsRef.current[label] = (localDocsRef.current[label] || []).filter((x) => x.id !== d.id);
+      setDocs([...localDocsRef.current[label]]);
+      return;
+    }
+    const code = window.prompt(`"${d.name}" 자료를 지웁니다.\n삭제 코드를 입력하세요.`);
+    if (code == null) return;
+    const { error } = await supabase.rpc('delete_document', { p_document_id: d.id, p_code: code.trim() });
+    if (error) {
+      setUploadErr(true);
+      setUploadStatus(/wrong code|28000/i.test(error.message || '') ? '삭제 코드가 틀렸어요.' : lectureErr(error.message));
+      return;
+    }
+    setUploadErr(false);
+    setUploadStatus(`"${d.name}" 지웠어요.`);
+    await loadDocs();
   }
 
   async function listModels() {
@@ -913,6 +1089,10 @@ export default function Studio() {
 
   async function handleFile(file) {
     setUploadErr(false);
+    if (isHtmlName(file.name) || isPptName(file.name)) {
+      await handleDoc(file);
+      return;
+    }
     if (isPdfName(file.name)) {
       if (!ensurePdfHost()) {
         setUploadErr(true);
@@ -925,7 +1105,7 @@ export default function Studio() {
     const kind = kindOf(file.name);
     if (!kind) {
       setUploadErr(true);
-      setUploadStatus('IFC, DWG, DXF, GLB, DAE, 3DM, PDF만 열 수 있어요.');
+      setUploadStatus('IFC, DWG, DXF, GLB, DAE, 3DM, PDF, HTML, PPT만 열 수 있어요.');
       return;
     }
     const project = projectForUpload();
@@ -1832,7 +2012,7 @@ export default function Studio() {
             <label className={`file${dragging ? ' is-drop' : ''}`} onDragOver={onOsFileOver} onDrop={onOsFileDrop}>
               <input
                 type="file"
-                accept=".ifc,.dxf,.dwg,.glb,.gltf,.dae,.3dm,.pdf,application/pdf"
+                accept=".ifc,.dxf,.dwg,.glb,.gltf,.dae,.3dm,.pdf,application/pdf,.html,.htm,text/html,.pptx,.ppt"
                 onDragOver={onOsFileOver}
                 onDrop={onOsFileDrop}
                 onChange={(e) => { onFiles(e.target.files); e.target.value = ''; }}
@@ -1842,9 +2022,9 @@ export default function Studio() {
             {uploadStatus && <p className={`status${uploadErr ? ' err' : ''}`}>{uploadStatus}</p>}
           </div>
           <ul className="tree">
-            {(!project || project.latest.length === 0) && <li className="quiet">파일 없음</li>}
+            {(!project || project.latest.length === 0) && docs.length === 0 && <li className="quiet">파일 없음</li>}
             {project?.latest.map((f) => (
-              <li key={f.id}>
+              <li key={f.id} className="tree-row">
                 <button
                   type="button"
                   className={`tree-file${activeId === f.id ? ' on' : ''}`}
@@ -1856,6 +2036,28 @@ export default function Studio() {
                   <span className="name">{lectureFileName(f)}</span>
                   <span className="meta"><span className="kind">{fileKindLabel(f.kind)}</span>{fmtDate(f.created_at)}</span>
                 </button>
+                <span className="row-acts">
+                  <button type="button" className="row-act" onClick={() => downloadFile(f)} title="다운로드" aria-label={`${f.name} 다운로드`}>
+                    <Icon><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>
+                  </button>
+                </span>
+              </li>
+            ))}
+            {docs.map((d) => (
+              <li key={d.id} className="tree-row">
+                <button type="button" className="tree-file" onClick={() => openDoc(d)}>
+                  <span className="tree-ico" aria-hidden="true">
+                    <Icon><path d="M8 4h6l4 4v12H8z" /><path d="M14 4v4h4" /><path d="M10 13l-1.5 1.5L10 16M14 13l1.5 1.5L14 16" /></Icon>
+                  </span>
+                  <span className="name">{d.name}</span>
+                  <span className="meta"><span className="kind">{isPptName(d.name) ? 'PPT' : 'HTML'}</span>{fmtDate(d.created_at)}</span>
+                </button>
+                <span className="row-acts">
+                  <button type="button" className="row-act" onClick={() => downloadDoc(d)} title="다운로드" aria-label={`${d.name} 다운로드`}>
+                    <Icon><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>
+                  </button>
+                  <button type="button" className="row-act del" onClick={() => onDeleteDoc(d)} title="자료 삭제 (코드 필요)" aria-label={`${d.name} 삭제`}>×</button>
+                </span>
               </li>
             ))}
           </ul>
@@ -1881,7 +2083,7 @@ export default function Studio() {
                   {backFold[project.key] && (
                     <ul className="tree-kids">
                       {project.back.map((f) => (
-                        <li key={f.id}>
+                        <li key={f.id} className="tree-row">
                           <button
                             type="button"
                             className={`tree-file${activeId === f.id ? ' on' : ''}`}
@@ -1893,6 +2095,11 @@ export default function Studio() {
                             <span className="name">{lectureFileName(f)}</span>
                             <span className="meta"><span className="kind">{fileKindLabel(f.kind)}</span>{fmtDate(f.created_at)}</span>
                           </button>
+                          <span className="row-acts">
+                            <button type="button" className="row-act" onClick={() => downloadFile(f)} title="다운로드" aria-label={`${f.name} 다운로드`}>
+                              <Icon><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>
+                            </button>
+                          </span>
                         </li>
                       ))}
                     </ul>
@@ -2055,6 +2262,25 @@ export default function Studio() {
               <Btn onClick={() => setPreview(null)}>닫기</Btn>
             </header>
             <img className="lightbox-photo" src={preview.url} alt="" />
+          </div>
+        </div>
+      )}
+
+      {docView && (
+        <div className="lightbox" role="dialog" aria-modal="true" aria-label={docView.name} onClick={() => setDocView(null)}>
+          <div className="lightbox-card lightbox-doc" onClick={(e) => e.stopPropagation()}>
+            <header className="lightbox-head">
+              <h3>{docView.name}</h3>
+              <span className="lightbox-acts">
+                <Btn onClick={() => downloadDoc(docView.doc)}>다운로드</Btn>
+                <Btn onClick={() => setDocView(null)}>닫기</Btn>
+              </span>
+            </header>
+            {docView.src
+              ? <iframe className="lightbox-frame doc-frame" title={docView.name} src={docView.src} allow="fullscreen" />
+              : docView.html == null
+              ? <p className="quiet doc-loading">불러오는 중…</p>
+              : <iframe className="lightbox-frame doc-frame" title={docView.name} srcDoc={docView.html} sandbox="allow-scripts allow-popups allow-modals allow-forms" allow="fullscreen" />}
           </div>
         </div>
       )}
