@@ -330,6 +330,16 @@ export default function Studio() {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'drawings' }, (payload) => {
         if (modelsRef.current.some((m) => m.id === payload.new?.model_id)) loadAllDrawings(modelsRef.current);
       })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'drawings' }, (payload) => {
+        const row = payload.new;
+        if (!row?.id || row.rotation == null) return;
+        drawingsAllRef.current = drawingsAllRef.current.map((d) => (d.id === row.id ? { ...d, rotation: row.rotation } : d));
+        setDrawings(drawingsAllRef.current);
+        if (drawingRef.current?.id === row.id) {
+          setDrawing((cur) => (cur ? { ...cur, rotation: row.rotation } : cur));
+          setPdfRot(pageTurn(row.rotation));
+        }
+      })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'events' }, () => {
         loadEvents();
       })
@@ -821,12 +831,33 @@ export default function Studio() {
     setDrawing(d);
     setPdfPage(page);
     setPdfPages(1);
-    setPdfRot(0);
+    setPdfRot(pageTurn(d.rotation || 0));
     setPdfZoom(1);
     setPdfFlip(false);
     setPdfErr('');
     setPreview(null);
     if (pin) setPending(null);
+  }
+
+  // 회전은 도면(drawings.rotation)에 저장해 다른 기기에서도 같은 방향으로 열립니다.
+  async function rotateDrawing() {
+    const d = drawingRef.current;
+    if (!d) return;
+    const next = pageTurn(rotRef.current - 90);
+    setPdfRot(next);
+    const patch = (row) => (row.id === d.id ? { ...row, rotation: next } : row);
+    drawingsAllRef.current = drawingsAllRef.current.map(patch);
+    setDrawings(drawingsAllRef.current);
+    setDrawing((cur) => (cur && cur.id === d.id ? { ...cur, rotation: next } : cur));
+    for (const list of Object.values(localRef.current.drawings)) {
+      for (const row of list) if (row.id === d.id) row.rotation = next;
+    }
+    if (!hasSupabase || !isShareableId(String(d.id))) return;
+    const { error } = await supabase.rpc('set_drawing_rotation', { p_drawing_id: d.id, p_rotation: next });
+    if (error) {
+      setUploadErr(true);
+      setUploadStatus(schemaGap(error.message) ? '회전 저장은 supabase-drawing-rotation.sql을 실행하면 돼요.' : lectureErr(error.message));
+    }
   }
 
   function closeDrawing() {
@@ -1845,7 +1876,7 @@ export default function Studio() {
                 <Btn className="icon-btn" disabled={pdfZoom >= 3} onClick={() => setPdfZoom((z) => clampPdfZoom(z + 0.25))} title="확대" aria-label="확대">
                   <Icon><path d="M12 5v14M5 12h14" /></Icon>
                 </Btn>
-                <Btn className="icon-btn" onClick={() => setPdfRot((r) => pageTurn(r - 90))} title="회전" aria-label="회전">
+                <Btn className="icon-btn" onClick={rotateDrawing} title="회전 (저장됨)" aria-label="회전">
                   <Icon><path d="M4 12a8 8 0 1 0 2.3-5.6" /><path d="M4 4v5h5" /></Icon>
                 </Btn>
                 <Btn className="icon-btn" pressed={pdfFlip} onClick={() => setPdfFlip((f) => !f)} title="좌우 반전" aria-label="좌우 반전">

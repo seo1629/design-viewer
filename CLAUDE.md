@@ -9,6 +9,7 @@
 - `NEXT_PUBLIC_*`는 dev 서버를 켤 때 박히므로 `.env.local`을 바꾸면 dev 서버를 **재시작**해야 합니다.
 - 스키마는 `supabase.sql` 한 파일이 전부입니다. 표 6개(projects, models, comments, drawings, events, app_settings), 버킷 3개(models, photos, drawings), RLS, Realtime publication, 삭제 함수 `delete_project`까지 들어 있고 몇 번을 돌려도 안전합니다.
 - 프로젝트가 기준입니다. `projects` 표에 한 행, 모델·코멘트는 `project_id`로 그 프로젝트에 묶입니다. 화면은 프로젝트를 바꾸면 그 프로젝트의 모델·코멘트만 보여 줍니다.
+- PDF 도면 회전은 `drawings.rotation`(0·90·180·270)에 저장. 스키마는 `supabase-drawing-rotation.sql`, 저장은 `set_drawing_rotation` 함수.
 - HTML 자료(발표자료 등)는 `documents` 표 + `documents` 버킷. 스키마는 `supabase-documents.sql`(supabase.sql 다음에 실행, 여러 번 돌려도 안전). 프로젝트(`project_id`)마다 여러 개, "파일 열기"로 .html·.pptx·.ppt를 올리면 왼쪽 목록에 뜹니다. HTML은 격리된 iframe(srcdoc), PPT는 Microsoft Office 웹 뷰어(공개 URL 필요, 10MB 이하)로 봅니다. 삭제는 `delete_document`(삭제 코드).
 - 코멘트 `kind`: `model`(3D 객체, pos_z 있음) · `dwg`(DWG/DXF 2D 좌표) · `pdf`(PDF 페이지 정규화 좌표). `/` 키로 세 화면 모두에서 핀을 찍습니다.
 
