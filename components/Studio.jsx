@@ -1087,6 +1087,31 @@ export default function Studio() {
     return head;
   }
 
+  // 3D 모델 없이 PDF만 있는 프로젝트도 공유되게, DB에 보이지 않는 기준 모델(path 없음) 한 행을 둡니다.
+  // 도면(drawings)·코멘트는 model_id로 이 행에 묶여 다른 기기에서도 보입니다. 목록에는 뜨지 않습니다.
+  async function ensureSharedHost() {
+    const host = currentRef.current;
+    const label = projectForUpload();
+    if (!hasSupabase || !host || isShareableId(String(host.id)) || isBuiltinProject(label)) return true;
+    const project_id = await ensureProjectId(label);
+    const ins = await supabase.from('models')
+      .insert({ name: label, path: '', kind: 'glb', owner: author.trim() || null, project: label, ...(project_id ? { project_id } : {}) })
+      .select().single();
+    if (ins.error) {
+      setUploadErr(true);
+      setUploadStatus(lectureErr(ins.error.message));
+      return false;
+    }
+    const m = { ...ins.data, url: '' };
+    localRef.current.models = localRef.current.models.filter((row) => row.id !== host.id);
+    modelsRef.current = [m, ...modelsRef.current.filter((row) => row.id !== host.id)];
+    setModels(modelsRef.current);
+    currentRef.current = m;
+    projectIdsRef.current = [m.id, ...projectIdsRef.current.filter((id) => id !== host.id)];
+    setCurrent(m);
+    return true;
+  }
+
   async function handleFile(file) {
     setUploadErr(false);
     if (isHtmlName(file.name) || isPptName(file.name)) {
@@ -1099,6 +1124,7 @@ export default function Studio() {
         setUploadStatus('프로젝트를 연 다음 PDF를 올려요.');
         return;
       }
+      if (!(await ensureSharedHost())) return;
       await handlePdf(file);
       return;
     }
