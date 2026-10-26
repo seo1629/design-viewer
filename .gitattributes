@@ -10,3 +10,5 @@
 *.jpg  binary
 *.ifc  -text
 *.dxf  -text
+*.ttf  binary
+*.otf  binary

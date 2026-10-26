@@ -9,7 +9,10 @@
 - `NEXT_PUBLIC_*`는 dev 서버를 켤 때 박히므로 `.env.local`을 바꾸면 dev 서버를 **재시작**해야 합니다.
 - 스키마는 `supabase.sql` 한 파일이 전부입니다. 표 6개(projects, models, comments, drawings, events, app_settings), 버킷 3개(models, photos, drawings), RLS, Realtime publication, 삭제 함수 `delete_project`까지 들어 있고 몇 번을 돌려도 안전합니다.
 - 프로젝트가 기준입니다. `projects` 표에 한 행, 모델·코멘트는 `project_id`로 그 프로젝트에 묶입니다. 화면은 프로젝트를 바꾸면 그 프로젝트의 모델·코멘트만 보여 줍니다.
-- PDF 도면 회전은 `drawings.rotation`(0·90·180·270)에 저장. 스키마는 `supabase-drawing-rotation.sql`, 저장은 `set_drawing_rotation` 함수.
+- PDF 도면 회전은 페이지별로 `drawings.page_rotations`({"1":0,"2":90})에 저장. 값은 PDF 자체 회전(/Rotate) 위에 더하는 각도. 처음 열 때 글자 방향으로 자동 결정(`lib/pdf-view.js` detectPageTurns), 사람이 돌린 페이지는 덮어씀. 스키마 `supabase-drawing-rotation.sql`, 저장 함수 `set_drawing_page_rotations`. 옛 `rotation` 칸은 읽지 않음.
+- DWG는 libredwg-web의 dwg_to_svg로 그립니다. 글자·치수·블록 속성 표시는 `patches/@mlightcad+libredwg-web+0.7.13.patch`(patch-package, postinstall)로 고쳐 씁니다. libredwg-web 버전을 올리면 패치를 다시 만들어야 합니다. DXF 글자는 `public/fonts/NanumGothic-Regular.ttf`(OFL)로 그립니다.
+- 폴더: `folders` 표(프로젝트마다, 기본 배치도·단위세대·상세도 자동 생성). models·drawings·documents의 `folder_id`로 묶음, 없으면 미분류. 스키마 `supabase-folders.sql`, 이동 `set_file_folder`, 삭제 `delete_folder`(삭제 코드, 파일은 미분류로). 왼쪽 패널은 프로젝트 › 폴더 › 파일 트리, 선택한 폴더에 업로드, 끌어다 놓아 이동.
+- 입장 비밀번호: 서버 전용 환경변수 `SITE_PASSWORD`(NEXT_PUBLIC_ 아님). `middleware.js`가 모든 페이지 앞에서 쿠키 `dv_auth`(비밀번호 해시, 30일)를 확인하고 없으면 `/login`으로. 비어 있으면 잠그지 않음. Vercel에는 Production 환경변수로 넣고 다시 배포. 비밀번호를 대화나 파일에 평문으로 남기지 않음.
 - HTML 자료(발표자료 등)는 `documents` 표 + `documents` 버킷. 스키마는 `supabase-documents.sql`(supabase.sql 다음에 실행, 여러 번 돌려도 안전). 프로젝트(`project_id`)마다 여러 개, "파일 열기"로 .html·.pptx·.ppt를 올리면 왼쪽 목록에 뜹니다. HTML은 격리된 iframe(srcdoc), PPT는 Microsoft Office 웹 뷰어(공개 URL 필요, 10MB 이하)로 봅니다. 삭제는 `delete_document`(삭제 코드).
 - 코멘트 `kind`: `model`(3D 객체, pos_z 있음) · `dwg`(DWG/DXF 2D 좌표) · `pdf`(PDF 페이지 정규화 좌표). `/` 키로 세 화면 모두에서 핀을 찍습니다.
 

@@ -6,7 +6,8 @@
     "dev": "next dev -p 5173",
     "build": "next build",
     "start": "next start -p 5173",
-    "check": "node lib/format.js"
+    "check": "node lib/format.js",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@mlightcad/libredwg-web": "^0.7.13",
@@ -19,5 +20,8 @@
     "rhino3dm": "^8.4.0",
     "three": "^0.160.0",
     "web-ifc": "^0.0.66"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.0"
   }
 }

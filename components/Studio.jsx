@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { ViewerEngine } from '@/lib/viewer-engine';
-import { kindOf, is3d, isShareableId, sharePath, fmtDate, safeFileName, isPdfName, isHtmlName, isPptName, PPT_TYPES, isImageFile, issueStatus, nextIssueStatus, lectureErr, hashColor, peersFromPresence, isPdfComment, is2dComment, commentSurface, commentWhere, schemaGap, unitPos, ndcFromEvent, ndcToUnit, pageTurn, clampPdfZoom, pageUnitFromRotated, rotatedFromPageUnit, groupProjects, sampleBundle, hlabBundle, mergeLectureModels, mergeLectureDrawings, SAMPLE_PROJECT, HLAB_PROJECT, rowProject, fileKindLabel, lectureFileName, commentHotkeyBlocked, projectKey, projectNameOf, projectActivity, activityTitle, fileEventType, asActivityEvent, eventKind, PROJECTS_KEY, readNamedProjects, addNamedProject, pickProject } from '@/lib/format';
-import { paintPdfPage } from '@/lib/pdf-view';
+import { kindOf, splitLatest, is3d, isShareableId, sharePath, fmtDate, safeFileName, isPdfName, isHtmlName, isPptName, PPT_TYPES, isImageFile, issueStatus, nextIssueStatus, lectureErr, hashColor, peersFromPresence, isPdfComment, is2dComment, commentSurface, commentWhere, schemaGap, unitPos, ndcFromEvent, ndcToUnit, pageTurn, clampPdfZoom, pageUnitFromRotated, rotatedFromPageUnit, groupProjects, sampleBundle, hlabBundle, mergeLectureModels, mergeLectureDrawings, SAMPLE_PROJECT, HLAB_PROJECT, rowProject, fileKindLabel, lectureFileName, commentHotkeyBlocked, projectKey, projectNameOf, projectActivity, activityTitle, fileEventType, asActivityEvent, eventKind, PROJECTS_KEY, readNamedProjects, addNamedProject, pickProject } from '@/lib/format';
+import { paintPdfPage, detectPageTurns } from '@/lib/pdf-view';
 import { supabase, hasSupabase, BUCKET, PHOTO_BUCKET, DRAWING_BUCKET, DOC_BUCKET, APP_TITLE, publicUrl } from '@/lib/supabase';
 
 const AUTHOR_KEY = 'viewer-author';
@@ -12,6 +12,7 @@ const AUTHOR_KEY = 'viewer-author';
 const narrow = () => typeof window !== 'undefined' && window.matchMedia('(max-width: 960px)').matches;
 const RIGHT_W_KEY = 'viewer-right-w';
 const ACTIVITY_KEY = 'viewer-activity';
+const DEFAULT_FOLDERS = ['배치도', '단위세대', '상세도'];
 const PRESENCE_KEY = 'viewer-presence';
 function readActivity() {
   try {
@@ -144,6 +145,8 @@ export default function Studio() {
   const pdfCanvasRef = useRef(null);
   const pdfStageRef = useRef(null);
   const rotRef = useRef(0);
+  const shownRotRef = useRef(0);
+  const autoTurnRef = useRef('');
   const flipRef = useRef(false);
   const drawingRef = useRef(null);
   const pageRef = useRef(1);
@@ -208,12 +211,23 @@ export default function Studio() {
   const [preview, setPreview] = useState(null);
   const [docs, setDocs] = useState([]);
   const [docView, setDocView] = useState(null);
+  const [folders, setFolders] = useState([]); // 지금 프로젝트의 폴더 [{id, name, sort}]
+  const [folderSel, setFolderSel] = useState(''); // 파일을 올릴 폴더 id
+  const [folderShut, setFolderShut] = useState({}); // 접은 폴더 {id: true}
+  const [newFolder, setNewFolder] = useState('');
+  const [dropOn, setDropOn] = useState(''); // 끌어다 놓는 중인 폴더 id
+  const folderSelRef = useRef('');
+  const loadFoldersRef = useRef(null);
+  const dragItemRef = useRef(null);
+  folderSelRef.current = folderSel;
   const [issueFilter, setIssueFilter] = useState('all');
   const [peers, setPeers] = useState([]);
   const [drawing, setDrawing] = useState(null);
   const [pdfPage, setPdfPage] = useState(1);
   const [pdfPages, setPdfPages] = useState(1);
-  const [pdfRot, setPdfRot] = useState(0);
+  const [pdfRot, setPdfRot] = useState(0); // 이 페이지에서 사람이(또는 자동으로) 더 돌린 각도
+  const [pdfBase, setPdfBase] = useState(0); // PDF 자체 회전(/Rotate)
+  const pdfShown = pageTurn(pdfBase + pdfRot); // 화면에 보이는 실제 회전
   const [pdfZoom, setPdfZoom] = useState(1);
   const [pdfFlip, setPdfFlip] = useState(false);
   const [pdfErr, setPdfErr] = useState('');
@@ -228,6 +242,7 @@ export default function Studio() {
   drawingRef.current = drawing;
   pageRef.current = pdfPage;
   rotRef.current = pdfRot;
+  shownRotRef.current = pdfShown;
   flipRef.current = pdfFlip;
   modelsRef.current = models;
   drawingsAllRef.current = drawings;
@@ -252,6 +267,7 @@ export default function Studio() {
 
   useEffect(() => {
     loadDocs();
+    loadFolders();
   }, [activeKey, namedProjects]);
 
   useEffect(() => {
@@ -332,12 +348,13 @@ export default function Studio() {
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'drawings' }, (payload) => {
         const row = payload.new;
-        if (!row?.id || row.rotation == null) return;
-        drawingsAllRef.current = drawingsAllRef.current.map((d) => (d.id === row.id ? { ...d, rotation: row.rotation } : d));
+        if (!row?.id) return;
+        drawingsAllRef.current = drawingsAllRef.current.map((d) => (d.id === row.id ? { ...d, folder_id: row.folder_id ?? null, ...(row.page_rotations ? { page_rotations: row.page_rotations } : {}) } : d));
+        if (!row.page_rotations) { setDrawings(drawingsAllRef.current); return; }
         setDrawings(drawingsAllRef.current);
         if (drawingRef.current?.id === row.id) {
-          setDrawing((cur) => (cur ? { ...cur, rotation: row.rotation } : cur));
-          setPdfRot(pageTurn(row.rotation));
+          setDrawing((cur) => (cur ? { ...cur, page_rotations: row.page_rotations } : cur));
+          setPdfRot(pageTurnOf(row, pageRef.current));
         }
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'events' }, () => {
@@ -345,6 +362,15 @@ export default function Studio() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'documents' }, () => {
         loadDocsRef.current?.();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'folders' }, () => {
+        loadFoldersRef.current?.();
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'models' }, (payload) => {
+        const row = payload.new;
+        if (!row?.id) return;
+        modelsRef.current = modelsRef.current.map((m) => (m.id === row.id ? { ...m, folder_id: row.folder_id ?? null } : m));
+        setModels(modelsRef.current);
       })
       .subscribe();
     return () => {
@@ -454,6 +480,7 @@ export default function Studio() {
         const info = await paintPdfPage(canvas, url, pdfPage, pdfRot, box.width - 48, box.height - 48, pdfZoom);
         if (dead || !info) return;
         setPdfPages(info.pages);
+        setPdfBase(info.baseRotate || 0);
         setPdfErr('');
         stage.scrollLeft = keep.x * stage.scrollWidth - stage.clientWidth / 2;
         stage.scrollTop = keep.y * stage.scrollHeight - stage.clientHeight / 2;
@@ -472,6 +499,39 @@ export default function Studio() {
     };
   }, [drawing?.url, pdfPage, pdfRot, pdfZoom]);
 
+  // 페이지를 넘기면 그 페이지에 저장된 회전으로.
+  useEffect(() => {
+    if (!drawing) return;
+    setPdfRot(pageTurnOf(drawing, pdfPage));
+  }, [drawing?.id, pdfPage, drawing?.page_rotations]);
+
+  // 처음 여는 도면: 페이지마다 글자 방향을 보고 회전을 정해 저장합니다.
+  // 이미 저장된 페이지(사람이 돌린 페이지 포함)는 건드리지 않습니다.
+  useEffect(() => {
+    const d = drawing;
+    if (!d?.url || autoTurnRef.current === d.id) return;
+    autoTurnRef.current = d.id;
+    let done = false;
+    let dead = false;
+    (async () => {
+      try {
+        const found = await detectPageTurns(d.url);
+        if (dead) return;
+        const have = (drawingRef.current?.id === d.id ? drawingRef.current : d).page_rotations || {};
+        const missing = Object.fromEntries(Object.entries(found).filter(([p]) => have[p] == null));
+        if (Object.keys(missing).length) await savePageTurns(d, missing);
+      } catch (err) {
+        console.warn('auto rotate', err);
+      } finally {
+        done = true;
+      }
+    })();
+    return () => {
+      dead = true;
+      if (!done && autoTurnRef.current === d.id) autoTurnRef.current = '';
+    };
+  }, [drawing?.id, drawing?.url]);
+
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') {
@@ -485,7 +545,7 @@ export default function Studio() {
       const d = drawingRef.current;
       if (d) {
         const shown = unitPos(cursorRef.current);
-        const pos = unitPos(pageUnitFromRotated(shown.x, shown.y, rotRef.current, flipRef.current));
+        const pos = unitPos(pageUnitFromRotated(shown.x, shown.y, shownRotRef.current, flipRef.current));
         setPending({ kind: 'pdf', x: pos.x, y: pos.y, page: pageRef.current, drawing_id: d.id });
         setRightOpen(true);
         return;
@@ -567,6 +627,119 @@ export default function Studio() {
     return data.id;
   }
 
+  // 폴더는 folders 표가 기준입니다. 프로젝트에 폴더가 하나도 없으면 기본 세 개를 만듭니다.
+  async function loadFolders() {
+    const label = projectNameOf(activeKeyRef.current);
+    if (!hasSupabase || isBuiltinProject(label)) {
+      setFolders([]);
+      return;
+    }
+    const pid = projectIdOf(label);
+    if (!pid) {
+      setFolders([]);
+      return;
+    }
+    const read = () => supabase.from('folders').select('*').eq('project_id', pid).order('sort', { ascending: true }).order('created_at', { ascending: true });
+    let { data, error } = await read();
+    if (!error && data && data.length === 0) {
+      await supabase.from('folders').upsert(
+        DEFAULT_FOLDERS.map((name, i) => ({ project_id: pid, name, sort: i + 1 })),
+        { onConflict: 'project_id,name', ignoreDuplicates: true },
+      );
+      ({ data, error } = await read());
+    }
+    if (projectNameOf(activeKeyRef.current) !== label) return;
+    const list = error ? [] : data || [];
+    setFolders(list);
+    if (!list.some((f) => f.id === folderSelRef.current)) setFolderSel(list[0]?.id || '');
+  }
+  loadFoldersRef.current = loadFolders;
+
+  function uploadFolderId() {
+    const id = folderSelRef.current;
+    return isShareableId(String(id || '')) ? id : null;
+  }
+
+  async function onCreateFolder(e) {
+    e.preventDefault();
+    const name = String(newFolder || '').trim();
+    const pid = projectIdOf(projectNameOf(activeKeyRef.current));
+    if (!name || !pid) return;
+    const sort = Math.max(0, ...folders.map((f) => f.sort || 0)) + 1;
+    const { data, error } = await supabase.from('folders').insert({ project_id: pid, name, sort }).select().single();
+    if (error) {
+      setUploadErr(true);
+      setUploadStatus(/duplicate|unique|23505/i.test(error.message || '') ? '같은 이름의 폴더가 있어요.' : lectureErr(error.message));
+      return;
+    }
+    setNewFolder('');
+    setFolderSel(data.id);
+    await loadFolders();
+  }
+
+  async function onDeleteFolder(fd) {
+    const code = window.prompt(`"${fd.name}" 폴더를 지웁니다. 안의 파일은 지워지지 않고 미분류로 옮겨져요.\n삭제 코드를 입력하세요.`);
+    if (code == null) return;
+    const { error } = await supabase.rpc('delete_folder', { p_folder_id: fd.id, p_code: code.trim() });
+    if (error) {
+      setUploadErr(true);
+      setUploadStatus(/wrong code|28000/i.test(error.message || '') ? '삭제 코드가 틀렸어요.' : lectureErr(error.message));
+      return;
+    }
+    patchFolderOf((row) => row.folder_id === fd.id, null);
+    setUploadErr(false);
+    setUploadStatus(`"${fd.name}" 폴더를 지웠어요.`);
+    await loadFolders();
+  }
+
+  // 메모리의 모델·도면·자료 중 test에 맞는 것의 folder_id를 바꿉니다.
+  function patchFolderOf(test, folderId) {
+    const patch = (row) => (test(row) ? { ...row, folder_id: folderId } : row);
+    modelsRef.current = modelsRef.current.map(patch);
+    setModels(modelsRef.current);
+    drawingsAllRef.current = drawingsAllRef.current.map(patch);
+    setDrawings(drawingsAllRef.current);
+    setDocs((list) => list.map(patch));
+  }
+
+  // 파일을 다른 폴더로 (목록에서 끌어다 폴더에 놓기)
+  async function moveToFolder(item, folderId) {
+    if (!item || !hasSupabase || !isShareableId(String(item.id))) return;
+    const { error } = await supabase.rpc('set_file_folder', { p_table: item.table, p_id: item.id, p_folder_id: folderId });
+    if (error) {
+      setUploadErr(true);
+      setUploadStatus(lectureErr(error.message));
+      return;
+    }
+    patchFolderOf((row) => row.id === item.id, folderId);
+    const fd = folders.find((f) => f.id === folderId);
+    setUploadErr(false);
+    setUploadStatus(`"${item.name}" → ${fd ? fd.name : '미분류'}`);
+  }
+
+  function dragFile(e, item) {
+    if (!isShareableId(String(item.id))) return;
+    dragItemRef.current = item;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', item.name);
+  }
+
+  function dropProps(folderId) {
+    const key = folderId || 'none';
+    return {
+      onDragOver: (e) => { if (!dragItemRef.current) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropOn(key); },
+      onDragLeave: () => setDropOn((v) => (v === key ? '' : v)),
+      onDrop: (e) => {
+        if (!dragItemRef.current) return;
+        e.preventDefault();
+        const item = dragItemRef.current;
+        dragItemRef.current = null;
+        setDropOn('');
+        moveToFolder(item, folderId);
+      },
+    };
+  }
+
   // HTML 자료는 documents 표가 기준입니다. 프로젝트(projects.id)마다 여러 개.
   async function loadDocs() {
     const label = projectNameOf(activeKeyRef.current);
@@ -623,7 +796,7 @@ export default function Studio() {
       setUploadStatus(lectureErr(up.error.message));
       return;
     }
-    const ins = await supabase.from('documents').insert({ project_id, name: file.name, path, owner: author.trim() || null }).select().single();
+    const ins = await supabase.from('documents').insert({ project_id, name: file.name, path, owner: author.trim() || null, ...(uploadFolderId() ? { folder_id: uploadFolderId() } : {}) }).select().single();
     if (ins.error) {
       setUploadErr(true);
       setUploadStatus(lectureErr(ins.error.message));
@@ -831,7 +1004,8 @@ export default function Studio() {
     setDrawing(d);
     setPdfPage(page);
     setPdfPages(1);
-    setPdfRot(pageTurn(d.rotation || 0));
+    setPdfRot(pageTurnOf(d, page));
+    setPdfBase(0);
     setPdfZoom(1);
     setPdfFlip(false);
     setPdfErr('');
@@ -839,25 +1013,41 @@ export default function Studio() {
     if (pin) setPending(null);
   }
 
-  // 회전은 도면(drawings.rotation)에 저장해 다른 기기에서도 같은 방향으로 열립니다.
+  // 회전은 페이지마다 drawings.page_rotations 에 저장합니다({"1":0,"2":90}).
+  // 값은 PDF 자체 회전(/Rotate) 위에 더하는 각도라, 저장이 없으면 PDF가 정한 방향 그대로입니다.
+  function pageTurnOf(d, page) {
+    const v = d?.page_rotations?.[String(page)];
+    return v == null ? 0 : pageTurn(v);
+  }
+
+  // 메모리의 도면 목록과 열린 도면에 회전값을 합칩니다. DB 저장은 하지 않습니다.
+  function mergePageTurns(id, turns) {
+    const merge = (row) => (row.id === id ? { ...row, page_rotations: { ...(row.page_rotations || {}), ...turns } } : row);
+    drawingsAllRef.current = drawingsAllRef.current.map(merge);
+    setDrawings(drawingsAllRef.current);
+    setDrawing((cur) => (cur && cur.id === id ? merge(cur) : cur));
+    for (const list of Object.values(localRef.current.drawings)) {
+      for (const row of list) if (row.id === id) row.page_rotations = { ...(row.page_rotations || {}), ...turns };
+    }
+  }
+
+  async function savePageTurns(d, turns) {
+    mergePageTurns(d.id, turns);
+    if (!hasSupabase || !isShareableId(String(d.id))) return;
+    const { error } = await supabase.rpc('set_drawing_page_rotations', { p_drawing_id: d.id, p_rotations: turns });
+    if (error) {
+      setUploadErr(true);
+      setUploadStatus(schemaGap(error.message) ? '페이지 회전 저장은 supabase-drawing-rotation.sql을 실행하면 돼요.' : lectureErr(error.message));
+    }
+  }
+
   async function rotateDrawing() {
     const d = drawingRef.current;
     if (!d) return;
+    const page = pageRef.current;
     const next = pageTurn(rotRef.current - 90);
     setPdfRot(next);
-    const patch = (row) => (row.id === d.id ? { ...row, rotation: next } : row);
-    drawingsAllRef.current = drawingsAllRef.current.map(patch);
-    setDrawings(drawingsAllRef.current);
-    setDrawing((cur) => (cur && cur.id === d.id ? { ...cur, rotation: next } : cur));
-    for (const list of Object.values(localRef.current.drawings)) {
-      for (const row of list) if (row.id === d.id) row.rotation = next;
-    }
-    if (!hasSupabase || !isShareableId(String(d.id))) return;
-    const { error } = await supabase.rpc('set_drawing_rotation', { p_drawing_id: d.id, p_rotation: next });
-    if (error) {
-      setUploadErr(true);
-      setUploadStatus(schemaGap(error.message) ? '회전 저장은 supabase-drawing-rotation.sql을 실행하면 돼요.' : lectureErr(error.message));
-    }
+    await savePageTurns(d, { [String(page)]: next });
   }
 
   function closeDrawing() {
@@ -910,7 +1100,7 @@ export default function Studio() {
   function onPdfPointerUp(e) {
     if (e.button !== 0 || !drawing || !pdfRef.current) return;
     const shown = ndcToUnit(ndcFromEvent(e, pdfRef.current));
-    const pos = unitPos(pageUnitFromRotated(shown.x, shown.y, rotRef.current, flipRef.current));
+    const pos = unitPos(pageUnitFromRotated(shown.x, shown.y, shownRotRef.current, flipRef.current));
     cursorRef.current = shown;
     setPending({ kind: 'pdf', x: pos.x, y: pos.y, page: pdfPage, drawing_id: drawing.id });
     setRightOpen(true);
@@ -1195,7 +1385,7 @@ export default function Studio() {
         modelsRef.current = modelsRef.current.map((row) => (row.id === current.id ? { ...row, project } : row));
       }
     }
-    let ins = await supabase.from('models').insert({ name: file.name, path, kind, owner: author.trim(), project, ...(project_id ? { project_id } : {}) }).select().single();
+    let ins = await supabase.from('models').insert({ name: file.name, path, kind, owner: author.trim(), project, ...(project_id ? { project_id } : {}), ...(uploadFolderId() ? { folder_id: uploadFolderId() } : {}) }).select().single();
     if (ins.error && /project|column|schema cache/i.test(ins.error.message || '')) {
       ins = await supabase.from('models').insert({ name: file.name, path, kind, owner: author.trim() }).select().single();
     }
@@ -1589,7 +1779,7 @@ export default function Studio() {
       setUploadStatus(lectureErr(up.error.message));
       return;
     }
-    const ins = await supabase.from('drawings').insert({ model_id: host.id, name: file.name, path }).select().single();
+    const ins = await supabase.from('drawings').insert({ model_id: host.id, name: file.name, path, ...(uploadFolderId() ? { folder_id: uploadFolderId() } : {}) }).select().single();
     if (ins.error) {
       setUploadErr(true);
       setUploadStatus(lectureErr(ins.error.message));
@@ -1732,6 +1922,131 @@ export default function Studio() {
   const modelPeers = peers.filter((p) => p.surface !== 'pdf');
   const pdfPeers = peers.filter((p) => p.surface === 'pdf' && p.drawing_id === String(drawing?.id || '') && p.page === pdfPage);
 
+  // ── 왼쪽 폴더 트리: 프로젝트 › 폴더(배치도·단위세대·상세도 …) › 파일 ──
+  const downIcon = <Icon><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>;
+  const chevron = (open) => <Icon>{open ? <path d="M8 10l4 4 4-4" /> : <path d="M10 8l4 4-4 4" />}</Icon>;
+  const folderIcon = <Icon><path d="M4 8h6l2 2h8v10H4z" /><path d="M4 8V6h5l2 2" /></Icon>;
+  const endDrag = () => { dragItemRef.current = null; setDropOn(''); };
+
+  function fileRow(f, p) {
+    return (
+      <li
+        key={f.id}
+        className="tree-row"
+        draggable={isShareableId(String(f.id))}
+        onDragStart={(e) => dragFile(e, { table: f.role === 'pdf' ? 'drawings' : 'models', id: f.id, name: f.name })}
+        onDragEnd={endDrag}
+      >
+        <button type="button" className={`tree-file${activeId === f.id ? ' on' : ''}`} onClick={() => openFile(f, p)}>
+          <span className="tree-ico" aria-hidden="true"><Icon><path d="M8 4h6l4 4v12H8z" /><path d="M14 4v4h4" /></Icon></span>
+          <span className="name">{lectureFileName(f)}</span>
+          <span className="meta"><span className="kind">{fileKindLabel(f.kind)}</span>{fmtDate(f.created_at)}</span>
+        </button>
+        <span className="row-acts">
+          <button type="button" className="row-act" onClick={() => downloadFile(f)} title="다운로드" aria-label={`${f.name} 다운로드`}>{downIcon}</button>
+        </span>
+      </li>
+    );
+  }
+
+  function docRow(d) {
+    return (
+      <li
+        key={d.id}
+        className="tree-row"
+        draggable={isShareableId(String(d.id))}
+        onDragStart={(e) => dragFile(e, { table: 'documents', id: d.id, name: d.name })}
+        onDragEnd={endDrag}
+      >
+        <button type="button" className="tree-file" onClick={() => openDoc(d)}>
+          <span className="tree-ico" aria-hidden="true"><Icon><path d="M8 4h6l4 4v12H8z" /><path d="M14 4v4h4" /><path d="M10 13l-1.5 1.5L10 16M14 13l1.5 1.5L14 16" /></Icon></span>
+          <span className="name">{d.name}</span>
+          <span className="meta"><span className="kind">{isPptName(d.name) ? 'PPT' : 'HTML'}</span>{fmtDate(d.created_at)}</span>
+        </button>
+        <span className="row-acts">
+          <button type="button" className="row-act" onClick={() => downloadDoc(d)} title="다운로드" aria-label={`${d.name} 다운로드`}>{downIcon}</button>
+          <button type="button" className="row-act del" onClick={() => onDeleteDoc(d)} title="자료 삭제 (코드 필요)" aria-label={`${d.name} 삭제`}>×</button>
+        </span>
+      </li>
+    );
+  }
+
+  // 한 폴더 안: 최신 파일 · 자료 · 이전 버전(접힘)
+  function folderContent(key, p, files, list) {
+    const { latest, back } = splitLatest(files);
+    if (!latest.length && !back.length && !list.length) return <li className="quiet ft-empty">비어 있음</li>;
+    return (
+      <>
+        {latest.map((f) => fileRow(f, p))}
+        {list.map(docRow)}
+        {back.length > 0 && (
+          <li className="tree-back">
+            <button type="button" className="tree-folder" aria-expanded={!!backFold[key]} onClick={() => setBackFold((s) => ({ ...s, [key]: !s[key] }))}>
+              <span className="tree-ico" aria-hidden="true">{chevron(!!backFold[key])}</span>
+              <span className="tree-ico" aria-hidden="true">{folderIcon}</span>
+              <span className="name">이전</span>
+              <span className="tree-count">{back.length}</span>
+            </button>
+            {backFold[key] && <ul className="tree-kids">{back.map((f) => fileRow(f, p))}</ul>}
+          </li>
+        )}
+      </>
+    );
+  }
+
+  function folderNode(fd, name, p, files, list) {
+    const id = fd?.id || null;
+    const key = id || 'none';
+    const shut = !!folderShut[key];
+    const sel = !!id && folderSel === id;
+    const count = splitLatest(files).latest.length + list.length;
+    return (
+      <li key={key} className={`ft-folder${dropOn === key ? ' drop' : ''}`} {...dropProps(id)}>
+        <button
+          type="button"
+          className={`tree-folder${sel ? ' sel' : ''}`}
+          aria-expanded={!shut}
+          title={id ? `${name} (여기에 올리기)` : '폴더가 없는 파일'}
+          onClick={() => {
+            if (id && !sel) { setFolderSel(id); setFolderShut((s) => ({ ...s, [key]: false })); }
+            else setFolderShut((s) => ({ ...s, [key]: !s[key] }));
+          }}
+        >
+          <span className="tree-ico" aria-hidden="true">{chevron(!shut)}</span>
+          <span className="tree-ico" aria-hidden="true">{folderIcon}</span>
+          <span className="name">{name}</span>
+          <span className="tree-count">{count || ''}</span>
+        </button>
+        {fd && (
+          <span className="row-acts">
+            <button type="button" className="row-act del" onClick={() => onDeleteFolder(fd)} title="폴더 삭제 (코드 필요)" aria-label={`${name} 폴더 삭제`}>×</button>
+          </span>
+        )}
+        {!shut && <ul className="tree-kids ft-kids">{folderContent(key, p, files, list)}</ul>}
+      </li>
+    );
+  }
+
+  function projectTree(p) {
+    const files = [...p.latest, ...p.back];
+    if (!folders.length) return folderContent(p.key, p, files, docs);
+    const known = new Set(folders.map((f) => f.id));
+    const where = (row) => (row?.folder_id && known.has(row.folder_id) ? row.folder_id : null);
+    const nodes = folders.map((fd) => folderNode(fd, fd.name, p, files.filter((f) => where(f.source) === fd.id), docs.filter((d) => where(d) === fd.id)));
+    const loose = files.filter((f) => !where(f.source));
+    const looseDocs = docs.filter((d) => !where(d));
+    if (loose.length || looseDocs.length) nodes.push(folderNode(null, '미분류', p, loose, looseDocs));
+    nodes.push(
+      <li key="ft-new" className="ft-new">
+        <form className="proj-new" onSubmit={onCreateFolder}>
+          <input value={newFolder} onChange={(e) => setNewFolder(e.target.value)} maxLength={40} placeholder="새 폴더 이름" aria-label="새 폴더 이름" />
+          <Btn type="submit">추가</Btn>
+        </form>
+      </li>,
+    );
+    return nodes;
+  }
+
   return (
     <div
       className={`studio${leftOpen ? ' is-models' : ''}${rightOpen ? ' is-comments' : ''}`}
@@ -1788,7 +2103,7 @@ export default function Studio() {
                 >
               {comments.map((c, i) => {
                 if (!isPdfComment(c) || String(c.drawing_id) !== String(drawing.id) || (c.page || 1) !== pdfPage || c.pos_x == null || issueStatus(c) === 'done') return null;
-                const mark = rotatedFromPageUnit(c.pos_x, c.pos_y, pdfRot, pdfFlip);
+                const mark = rotatedFromPageUnit(c.pos_x, c.pos_y, pdfShown, pdfFlip);
                 return (
                   <button
                     key={c.id || i}
@@ -1806,7 +2121,7 @@ export default function Studio() {
                 );
               })}
               {pending?.kind === 'pdf' && pending.page === pdfPage && (() => {
-                const mark = rotatedFromPageUnit(pending.x, pending.y, pdfRot, pdfFlip);
+                const mark = rotatedFromPageUnit(pending.x, pending.y, pdfShown, pdfFlip);
                 return <span className="pdf-pin pending" style={{ '--x': mark.x, '--y': mark.y, '--c': '#1c1c21' }}>+</span>;
               })()}
               {pdfPeers.length > 0 && (
@@ -1876,7 +2191,7 @@ export default function Studio() {
                 <Btn className="icon-btn" disabled={pdfZoom >= 3} onClick={() => setPdfZoom((z) => clampPdfZoom(z + 0.25))} title="확대" aria-label="확대">
                   <Icon><path d="M12 5v14M5 12h14" /></Icon>
                 </Btn>
-                <Btn className="icon-btn" onClick={rotateDrawing} title="회전 (저장됨)" aria-label="회전">
+                <Btn className="icon-btn" onClick={rotateDrawing} title="이 페이지 회전 (저장됨)" aria-label="회전">
                   <Icon><path d="M4 12a8 8 0 1 0 2.3-5.6" /><path d="M4 4v5h5" /></Icon>
                 </Btn>
                 <Btn className="icon-btn" pressed={pdfFlip} onClick={() => setPdfFlip((f) => !f)} title="좌우 반전" aria-label="좌우 반전">
@@ -2076,93 +2391,17 @@ export default function Studio() {
               />
               <span>파일 열기</span>
             </label>
+            {folders.length > 0 && (
+              <p className="ft-target">올릴 폴더 <b>{folders.find((f) => f.id === folderSel)?.name || '미분류'}</b> · 파일을 끌어 다른 폴더로 옮길 수 있어요</p>
+            )}
             {uploadStatus && <p className={`status${uploadErr ? ' err' : ''}`}>{uploadStatus}</p>}
           </div>
-          <ul className="tree">
-            {(!project || project.latest.length === 0) && docs.length === 0 && <li className="quiet">파일 없음</li>}
-            {project?.latest.map((f) => (
-              <li key={f.id} className="tree-row">
-                <button
-                  type="button"
-                  className={`tree-file${activeId === f.id ? ' on' : ''}`}
-                  onClick={() => openFile(f, project)}
-                >
-                  <span className="tree-ico" aria-hidden="true">
-                    <Icon><path d="M8 4h6l4 4v12H8z" /><path d="M14 4v4h4" /></Icon>
-                  </span>
-                  <span className="name">{lectureFileName(f)}</span>
-                  <span className="meta"><span className="kind">{fileKindLabel(f.kind)}</span>{fmtDate(f.created_at)}</span>
-                </button>
-                <span className="row-acts">
-                  <button type="button" className="row-act" onClick={() => downloadFile(f)} title="다운로드" aria-label={`${f.name} 다운로드`}>
-                    <Icon><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>
-                  </button>
-                </span>
-              </li>
-            ))}
-            {docs.map((d) => (
-              <li key={d.id} className="tree-row">
-                <button type="button" className="tree-file" onClick={() => openDoc(d)}>
-                  <span className="tree-ico" aria-hidden="true">
-                    <Icon><path d="M8 4h6l4 4v12H8z" /><path d="M14 4v4h4" /><path d="M10 13l-1.5 1.5L10 16M14 13l1.5 1.5L14 16" /></Icon>
-                  </span>
-                  <span className="name">{d.name}</span>
-                  <span className="meta"><span className="kind">{isPptName(d.name) ? 'PPT' : 'HTML'}</span>{fmtDate(d.created_at)}</span>
-                </button>
-                <span className="row-acts">
-                  <button type="button" className="row-act" onClick={() => downloadDoc(d)} title="다운로드" aria-label={`${d.name} 다운로드`}>
-                    <Icon><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>
-                  </button>
-                  <button type="button" className="row-act del" onClick={() => onDeleteDoc(d)} title="자료 삭제 (코드 필요)" aria-label={`${d.name} 삭제`}>×</button>
-                </span>
-              </li>
-            ))}
+          {/* 프로젝트는 위쪽 선택 목록에서 고르고, 트리는 그 프로젝트의 폴더만 보여 줍니다. */}
+          <ul className="tree ftree" aria-label={`${project?.label || '프로젝트'} 폴더`}>
+            {project ? projectTree(project) : <li className="quiet ft-empty">위에서 프로젝트를 고르세요</li>}
           </ul>
           {project && (
             <ul className="tree-kids tree-tail">
-              {project.back.length > 0 && (
-                <li className="tree-back">
-                  <button
-                    type="button"
-                    className="tree-folder"
-                    aria-expanded={!!backFold[project.key]}
-                    onClick={() => setBackFold((s) => ({ ...s, [project.key]: !s[project.key] }))}
-                  >
-                    <span className="tree-ico" aria-hidden="true">
-                      <Icon>{backFold[project.key] ? <path d="M8 10l4 4 4-4" /> : <path d="M10 8l4 4-4 4" />}</Icon>
-                    </span>
-                    <span className="tree-ico" aria-hidden="true">
-                      <Icon><path d="M4 8h6l2 2h8v10H4z" /><path d="M4 8V6h5l2 2" /></Icon>
-                    </span>
-                    <span className="name">이전</span>
-                    <span className="tree-count">{project.back.length}</span>
-                  </button>
-                  {backFold[project.key] && (
-                    <ul className="tree-kids">
-                      {project.back.map((f) => (
-                        <li key={f.id} className="tree-row">
-                          <button
-                            type="button"
-                            className={`tree-file${activeId === f.id ? ' on' : ''}`}
-                            onClick={() => openFile(f, project)}
-                          >
-                            <span className="tree-ico" aria-hidden="true">
-                              <Icon><path d="M8 4h6l4 4v12H8z" /><path d="M14 4v4h4" /></Icon>
-                            </span>
-                            <span className="name">{lectureFileName(f)}</span>
-                            <span className="meta"><span className="kind">{fileKindLabel(f.kind)}</span>{fmtDate(f.created_at)}</span>
-                          </button>
-                          <span className="row-acts">
-                            <button type="button" className="row-act" onClick={() => downloadFile(f)} title="다운로드" aria-label={`${f.name} 다운로드`}>
-                              <Icon><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>
-                            </button>
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              )}
               <li className="tree-activity">
                 <button
                   type="button"
