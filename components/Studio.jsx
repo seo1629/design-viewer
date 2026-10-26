@@ -499,6 +499,55 @@ export default function Studio() {
     };
   }, [drawing?.url, pdfPage, pdfRot, pdfZoom]);
 
+  // PDF: 휠만 굴리면 스크롤(화면 이동), Ctrl+휠은 확대·축소, 휠 버튼 누른 채 끌면 화면 이동.
+  useEffect(() => {
+    const stage = pdfStageRef.current;
+    if (!drawing || !stage) return;
+    let acc = 0;
+    let drag = null;
+    const onWheel = (e) => {
+      if (!e.ctrlKey && !e.metaKey) return; // 기본 스크롤
+      e.preventDefault(); // 브라우저 페이지 확대 막기
+      acc += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      if (Math.abs(acc) < 40) return; // 터치패드의 잦은 작은 이벤트는 모아서 한 단계
+      const step = acc < 0 ? 0.25 : -0.25;
+      acc = 0;
+      setPdfZoom((z) => clampPdfZoom(z + step));
+    };
+    const onDown = (e) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      drag = { x: e.clientX, y: e.clientY, l: stage.scrollLeft, t: stage.scrollTop, id: e.pointerId };
+      stage.setPointerCapture(e.pointerId);
+      stage.classList.add('is-panning');
+    };
+    const onMove = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      stage.scrollLeft = drag.l - (e.clientX - drag.x);
+      stage.scrollTop = drag.t - (e.clientY - drag.y);
+    };
+    const onUp = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      drag = null;
+      stage.classList.remove('is-panning');
+    };
+    const noAutoScroll = (e) => { if (e.button === 1) e.preventDefault(); };
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    stage.addEventListener('pointerdown', onDown);
+    stage.addEventListener('pointermove', onMove);
+    stage.addEventListener('pointerup', onUp);
+    stage.addEventListener('pointercancel', onUp);
+    stage.addEventListener('mousedown', noAutoScroll);
+    return () => {
+      stage.removeEventListener('wheel', onWheel);
+      stage.removeEventListener('pointerdown', onDown);
+      stage.removeEventListener('pointermove', onMove);
+      stage.removeEventListener('pointerup', onUp);
+      stage.removeEventListener('pointercancel', onUp);
+      stage.removeEventListener('mousedown', noAutoScroll);
+    };
+  }, [drawing?.id]);
+
   // 페이지를 넘기면 그 페이지에 저장된 회전으로.
   useEffect(() => {
     if (!drawing) return;

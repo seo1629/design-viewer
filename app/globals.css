@@ -1037,3 +1037,4 @@ body {
 .login-go { height: 34px; justify-content: center; background: #0474e0; color: #fff; border-color: #0474e0; font-weight: 600; }
 .login-go:disabled { opacity: .5; }
 .login-err { margin: 0; font-size: 12px; color: #c0392b; }
+.pdf-stage.is-panning { cursor: grabbing; }

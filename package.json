@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -p 5173",
     "check": "node lib/format.js",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package --error-on-fail"
   },
   "dependencies": {
     "@mlightcad/libredwg-web": "^0.7.13",
