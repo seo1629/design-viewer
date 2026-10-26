@@ -102,6 +102,14 @@ function blockBrowserFileOpen(e) {
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
 }
 
+// 코멘트가 지금 연 파일의 것인가: PDF면 그 도면, 모델·DWG·DXF면 그 파일(model_id).
+// 아무 파일도 열지 않았으면 보여 주지 않습니다(트리에서 파일을 골라야 그 파일의 코멘트가 보임).
+function commentOnOpenFile(c, drawing, view) {
+  if (drawing) return isPdfComment(c) && String(c.drawing_id) === String(drawing.id);
+  if (view) return !isPdfComment(c) && String(c.model_id) === String(view.id);
+  return false;
+}
+
 function noteEventsGapMsg(ok, missing, already) {
   return missing && !already ? '활동은 표가 생기면 남아요' : ok;
 }
@@ -210,6 +218,7 @@ export default function Studio() {
   const [photo, setPhoto] = useState(null);
   const [preview, setPreview] = useState(null);
   const [docs, setDocs] = useState([]);
+  const [filePicked, setFilePicked] = useState(false); // 사람이 고른 파일을 열었나(자동으로 연 첫 모델은 아님)
   const [docView, setDocView] = useState(null);
   const [folders, setFolders] = useState([]); // 지금 프로젝트의 폴더 [{id, name, sort}]
   const [folderSel, setFolderSel] = useState(''); // 파일을 올릴 폴더 id
@@ -322,9 +331,12 @@ export default function Studio() {
     };
   }, []);
 
+  // 도면 위 핀도 지금 연 파일의 코멘트만. 번호가 어긋나지 않게 다른 파일 것은 자리만 남기고 위치를 지웁니다.
   useEffect(() => {
-    engRef.current?.setPins(comments, pending);
-  }, [comments, pending]);
+    const d = filePicked ? drawing : null;
+    const v = filePicked ? view : null;
+    engRef.current?.setPins(comments.map((c) => (commentOnOpenFile(c, d, v) ? c : { ...c, pos_x: null, pos_y: null, pos_z: null })), pending);
+  }, [comments, pending, view?.id, drawing?.id, filePicked]);
 
   useEffect(() => {
     if (focusIdx == null) return;
@@ -1232,6 +1244,7 @@ export default function Studio() {
   }
 
   async function openProject(p) {
+    setFilePicked(false);
     if (!p) return;
     const ifc = (p.latest || []).find((f) => f.kind === 'ifc')
       || (p.back || []).find((f) => f.kind === 'ifc');
@@ -1309,6 +1322,7 @@ export default function Studio() {
         setUploadStatus('모델을 찾을 수 없어요.');
         return;
       }
+      setFilePicked(true);
       await openRef.current(m, list, draws);
     })();
     return () => {
@@ -1383,6 +1397,7 @@ export default function Studio() {
   }
 
   async function handleFile(file) {
+    setFilePicked(true);
     setUploadErr(false);
     if (isHtmlName(file.name) || isPptName(file.name)) {
       await handleDoc(file);
@@ -1561,6 +1576,7 @@ export default function Studio() {
   async function onSubmit(e) {
     e.preventDefault();
     if (!current || saving || !body.trim()) return;
+    setFilePicked(true); // 이 파일에 글을 남기면 그 파일 코멘트를 보여 줌
     if (photo && !isImageFile(photo)) {
       setCommentErr(true);
       setCommentStatus('이미지 파일만 붙일 수 있어요.');
@@ -1568,6 +1584,10 @@ export default function Studio() {
     }
     const pdfPin = pending?.kind === 'pdf';
     const dwgPin = !pdfPin && pending != null && pending.x != null && pending.z == null; // DWG/DXF 위 핀
+    // 모델·DWG·DXF 코멘트는 지금 연 그 파일에 답니다(파일별로 보이게). PDF는 drawing_id로 구분하므로 기준 모델 그대로.
+    const target = !drawing && !pdfPin && view?.id ? view : current;
+    // PDF를 보는 중에 핀 없이 남긴 글도 그 도면·쪽의 코멘트로 둡니다.
+    const pdfNote = !pdfPin && !!drawing && !pending;
     const row = {
       author: author.trim(),
       body: body.trim(),
@@ -1576,13 +1596,13 @@ export default function Studio() {
       pos_z: pdfPin || dwgPin ? null : pending?.z ?? null,
       element_id: pdfPin || dwgPin ? null : pending?.element_id ?? null,
       element_name: pdfPin || dwgPin ? null : pending?.element_name ?? null,
-      ...(pdfPin ? { kind: 'pdf', drawing_id: pending.drawing_id, page: pending.page || 1 } : dwgPin ? { kind: 'dwg' } : {}),
+      ...(pdfPin ? { kind: 'pdf', drawing_id: pending.drawing_id, page: pending.page || 1 } : pdfNote ? { kind: 'pdf', drawing_id: drawing.id, page: pdfPage || 1 } : dwgPin ? { kind: 'dwg' } : {}),
     };
     setSaving(true);
     setCommentErr(false);
     const finishLocal = async (msg, err = false) => {
-      const saved = keepLocalComment({ ...row, model_id: current.id }, photo);
-      await writeEvent({ type: 'comment', model_id: current.id, comment_id: saved.id, ref: saved.id, author: saved.author, name: saved.body, surface: commentSurface(saved) });
+      const saved = keepLocalComment({ ...row, model_id: target.id }, photo);
+      await writeEvent({ type: 'comment', model_id: target.id, comment_id: saved.id, ref: saved.id, author: saved.author, name: saved.body, surface: commentSurface(saved) });
       setBody('');
       setPhoto(null);
       setPending(null);
@@ -1599,16 +1619,16 @@ export default function Studio() {
         await finishLocal(photo ? '이 브라우저에만 남아요. 사진은 공유되지 않아요.' : '이 브라우저에만 남아요.');
         return;
       }
-      if (!isShareableId(String(current.id))) {
+      if (!isShareableId(String(target.id))) {
         await finishLocal(photo ? '이 브라우저에만 남아요. 사진은 공유되지 않아요.' : '이 브라우저에만 남아요.');
         return;
       }
-      const payload = { model_id: current.id, ...row };
+      const payload = { model_id: target.id, ...row };
       const pid = current.project_id || activeProjectId();
       if (pid) payload.project_id = pid;
-      if (pdfPin && !isShareableId(String(payload.drawing_id || ''))) delete payload.drawing_id;
+      if ((pdfPin || pdfNote) && !isShareableId(String(payload.drawing_id || ''))) delete payload.drawing_id;
       if (photo) {
-        const path = `${current.id}/${Date.now()}_${safeFileName(photo.name)}`;
+        const path = `${target.id}/${Date.now()}_${safeFileName(photo.name)}`;
         const up = await supabase.storage.from(PHOTO_BUCKET).upload(path, photo, { upsert: false });
         if (up.error) {
           failDb(up.error.message);
@@ -1625,8 +1645,8 @@ export default function Studio() {
         failDb(error.message);
         return;
       }
-      if (pdfPin && pending.drawing_id && !data.drawing_id) keepLocalComment({ ...data, drawing_id: pending.drawing_id, kind: 'pdf' });
-      await writeEvent({ type: 'comment', model_id: current.id, comment_id: data.id, ref: data.id, author: data.author, name: data.body, surface: commentSurface(data) });
+      if ((pdfPin || pdfNote) && row.drawing_id && !data.drawing_id) keepLocalComment({ ...data, drawing_id: row.drawing_id, kind: 'pdf' });
+      await writeEvent({ type: 'comment', model_id: target.id, comment_id: data.id, ref: data.id, author: data.author, name: data.body, surface: commentSurface(data) });
       setBody('');
       setPhoto(null);
       setPending(null);
@@ -1755,6 +1775,7 @@ export default function Studio() {
   }
 
   function openActivity(ev, project) {
+    setFilePicked(true);
     if (ev.type === 'file_add' || ev.type === 'file_replace') {
       const file = ev.file || [...project.latest, ...project.back].find((f) => f.id === ev.file_id);
       if (file) openFile(file, project);
@@ -1964,8 +1985,13 @@ export default function Studio() {
     await loadEvents();
   }
 
+  // 지금 연 파일에 남긴 코멘트만 보여 줍니다. 번호(i)는 프로젝트 전체 목록 기준 그대로 둡니다.
+  const pickedDrawing = filePicked ? drawing : null;
+  const pickedView = filePicked ? view : null;
+  const fileComments = comments.filter((c) => commentOnOpenFile(c, pickedDrawing, pickedView));
   const visibleComments = comments
     .map((c, i) => ({ c, i }))
+    .filter(({ c }) => commentOnOpenFile(c, pickedDrawing, pickedView))
     .filter(({ c }) => issueFilter === 'done' ? issueStatus(c) === 'done' : issueStatus(c) !== 'done');
   const acts = project ? projectActivity(project, comments, extraEvents, author) : [];
   const modelPeers = peers.filter((p) => p.surface !== 'pdf');
@@ -1986,7 +2012,7 @@ export default function Studio() {
         onDragStart={(e) => dragFile(e, { table: f.role === 'pdf' ? 'drawings' : 'models', id: f.id, name: f.name })}
         onDragEnd={endDrag}
       >
-        <button type="button" className={`tree-file${activeId === f.id ? ' on' : ''}`} onClick={() => openFile(f, p)}>
+        <button type="button" className={`tree-file${activeId === f.id ? ' on' : ''}`} onClick={() => { setFilePicked(true); openFile(f, p); }}>
           <span className="tree-ico" aria-hidden="true"><Icon><path d="M8 4h6l4 4v12H8z" /><path d="M14 4v4h4" /></Icon></span>
           <span className="name">{lectureFileName(f)}</span>
           <span className="meta"><span className="kind">{fileKindLabel(f.kind)}</span>{fmtDate(f.created_at)}</span>
@@ -2491,7 +2517,7 @@ export default function Studio() {
           <div className="panel-resize" onPointerDown={onRightResizeStart} title="끌어서 너비 조절" />
           <header className="panel-head">
             <h2>코멘트</h2>
-            {current && <p className="quiet">{comments.length}</p>}
+            {current && <p className="quiet">{fileComments.length}</p>}
           </header>
           {current && (
             <div className="filters" role="group" aria-label="상태">
@@ -2501,9 +2527,9 @@ export default function Studio() {
             </div>
           )}
           <ul className="comments">
-            {!current && <li className="quiet">모델 없음</li>}
-            {current && comments.length === 0 && <li className="quiet">코멘트 없음</li>}
-            {current && comments.length > 0 && visibleComments.length === 0 && <li className="quiet">없음</li>}
+            {!current && <li className="quiet">왼쪽 트리에서 파일을 고르면 그 파일의 코멘트가 보여요</li>}
+            {current && fileComments.length === 0 && <li className="quiet">{pickedDrawing || pickedView ? "이 파일에 남긴 코멘트 없음" : "왼쪽 트리에서 파일을 고르면 그 파일의 코멘트가 보여요"}</li>}
+            {current && fileComments.length > 0 && visibleComments.length === 0 && <li className="quiet">없음</li>}
             {visibleComments.map(({ c, i }) => {
               const st = issueStatus(c);
               const src = commentPhotoUrl(c);
