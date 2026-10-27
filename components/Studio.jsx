@@ -110,6 +110,16 @@ function commentOnOpenFile(c, drawing, view) {
   return false;
 }
 
+// 핀 번호는 파일마다 1부터: 그 파일에 핀을 찍은 순서(작성 순). id → 번호
+function pinNumbers(comments, drawing, view) {
+  const map = new Map();
+  let n = 0;
+  for (const c of comments) {
+    if (commentOnOpenFile(c, drawing, view) && c.pos_x != null) map.set(c.id ?? c, ++n);
+  }
+  return map;
+}
+
 function noteEventsGapMsg(ok, missing, already) {
   return missing && !already ? '활동은 표가 생기면 남아요' : ok;
 }
@@ -335,7 +345,8 @@ export default function Studio() {
   useEffect(() => {
     const d = filePicked ? drawing : null;
     const v = filePicked ? view : null;
-    engRef.current?.setPins(comments.map((c) => (commentOnOpenFile(c, d, v) ? c : { ...c, pos_x: null, pos_y: null, pos_z: null })), pending);
+    const nums = pinNumbers(comments, d, v);
+    engRef.current?.setPins(comments.map((c) => (commentOnOpenFile(c, d, v) ? { ...c, pin_no: nums.get(c.id ?? c) } : { ...c, pos_x: null, pos_y: null, pos_z: null })), pending);
   }, [comments, pending, view?.id, drawing?.id, filePicked]);
 
   useEffect(() => {
@@ -1989,6 +2000,8 @@ export default function Studio() {
   const pickedDrawing = filePicked ? drawing : null;
   const pickedView = filePicked ? view : null;
   const fileComments = comments.filter((c) => commentOnOpenFile(c, pickedDrawing, pickedView));
+  const pinNo = pinNumbers(comments, pickedDrawing, pickedView);
+  const numOf = (c, i) => pinNo.get(c.id ?? c) ?? i + 1;
   const visibleComments = comments
     .map((c, i) => ({ c, i }))
     .filter(({ c }) => commentOnOpenFile(c, pickedDrawing, pickedView))
@@ -2160,6 +2173,15 @@ export default function Studio() {
         </label>
         <p className="app-bar-line">여러 명이 남긴 설계가 DB에 쌓인다</p>
         <p className={`mode${hasSupabase ? '' : ' local'}`}>{hasSupabase ? '연결됨' : '로컬'}</p>
+        <button
+          type="button"
+          className="btn lock-btn"
+          title="잠그고 비밀번호 화면으로"
+          onClick={async () => {
+            try { await fetch('/api/login', { method: 'DELETE' }); } catch { /* 오프라인이어도 화면은 이동 */ }
+            window.location.replace('/login');
+          }}
+        >잠금</button>
       </header>
       <div className="studio-body">
       <div className="stage" ref={stageRef} onDragOver={onOsFileOver} onDrop={onOsFileDrop}>
@@ -2185,13 +2207,13 @@ export default function Studio() {
                     type="button"
                     className={`pdf-pin${focusIdx === i ? ' on' : ''}`}
                     style={{ '--x': mark.x, '--y': mark.y, '--c': hashColor(c.author || c.id) }}
-                    aria-label={`핀 ${i + 1}`}
+                    aria-label={`핀 ${numOf(c, i)}`}
                     onPointerUp={(e) => {
                       e.stopPropagation();
                       focusMark(c, i);
                     }}
                   >
-                    {i + 1}
+                    {numOf(c, i)}
                   </button>
                 );
               })}
@@ -2541,9 +2563,9 @@ export default function Studio() {
                     className={`thread-mark${c.pos_x == null ? ' none' : ''}`}
                     style={{ '--pin': hashColor(who) }}
                     onClick={() => focusMark(c, i)}
-                    aria-label={c.pos_x != null ? `핀 ${i + 1}` : who}
+                    aria-label={c.pos_x != null ? `핀 ${numOf(c, i)}` : who}
                   >
-                    {c.pos_x != null ? i + 1 : who.slice(0, 1)}
+                    {c.pos_x != null ? numOf(c, i) : who.slice(0, 1)}
                   </button>
                   <div className="thread-body">
                     <div className="thread-meta">

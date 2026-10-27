@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { AUTH_COOKIE, AUTH_MAX_AGE, authToken, sameText, sitePassword } from '@/lib/site-auth';
+import { AUTH_COOKIE, authToken, sameText, sitePassword } from '@/lib/site-auth';
 
 export async function POST(req) {
   const password = sitePassword();
@@ -13,12 +13,12 @@ export async function POST(req) {
     return NextResponse.json({ ok: false }, { status: 401 });
   }
   const res = NextResponse.json({ ok: true });
+  // 기간을 정하지 않은 쿠키: 브라우저를 모두 닫으면 사라져, 다시 열면 비밀번호를 묻습니다.
   res.cookies.set(AUTH_COOKIE, await authToken(password), {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
     path: '/',
-    maxAge: AUTH_MAX_AGE,
   });
   return res;
 }
